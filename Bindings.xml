@@ -1,0 +1,5 @@
+<Bindings>
+    <Binding name="LOOTLEDGER_TOGGLE" description="Toggle Loot Ledger">
+        LOOTLEDGER_TOGGLE()
+    </Binding>
+</Bindings>
