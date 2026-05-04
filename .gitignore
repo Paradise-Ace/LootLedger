@@ -1,0 +1,2 @@
+# WoW SavedVariables (never commit player data)
+*.lua.bak

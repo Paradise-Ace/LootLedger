@@ -260,6 +260,9 @@ ignoreBtn:SetScript("OnLeave", GameTooltip_Hide)
 
 local footer = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 footer:SetPoint("BOTTOMLEFT", 14, 6)
+footer:SetPoint("BOTTOMRIGHT", -30, 6)
+footer:SetJustifyH("LEFT")
+footer:SetWordWrap(true)
 
 -- Undo button — appears briefly after ignoring an item, lets the user reverse it.
 local undoBtn = CreateFrame("Button", nil, f)
@@ -329,7 +332,7 @@ undoTimer:SetScript("OnUpdate", function(self, elapsed)
 end)
 
 local sf = CreateFrame("ScrollFrame", "LootTrackerScroll", f, "UIPanelScrollFrameTemplate")
-sf:SetPoint("TOPLEFT", 12, -80); sf:SetPoint("BOTTOMRIGHT", -30, 22)
+sf:SetPoint("TOPLEFT", 12, -80); sf:SetPoint("BOTTOMRIGHT", -30, 40)
 local Content = CreateFrame("Frame", nil, sf)
 Content:SetSize(270, 1); sf:SetScrollChild(Content)
 
@@ -373,11 +376,13 @@ local function GetLabel()
     b.icon:Hide()
     b.txt = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     b.txt:SetPoint("LEFT", 0, 0)
-    -- Right-aligned money label, used only on mob/dungeon header rows.
-    -- Smaller font so it doesn't crowd the mob name.
+    -- Right-aligned money/AH label. Top-anchored so when the row grows
+    -- taller (long wrapped name), the price stays aligned with the first
+    -- line of the name instead of drifting toward vertical centre.
     b.money = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    b.money:SetPoint("RIGHT", 0, 0)
+    b.money:SetPoint("TOPRIGHT", 0, -1)
     b.money:SetJustifyH("RIGHT")
+    b.money:SetJustifyV("TOP")
     table.insert(labelPool, b)
     return b
 end
@@ -462,6 +467,57 @@ local function GetVendorPrice(link)
     if not link then return 0 end
     local _, _, _, _, _, _, _, _, _, _, sellPrice = GetItemInfo(link)
     return sellPrice or 0
+end
+
+-- Auctionator integration. Soft dependency: enabled only when its API
+-- can be located. Auctionator's API surface differs across versions, so
+-- we probe multiple known paths. Returns the path identifier ("v1",
+-- "atr", etc.) when available, or false.
+local function IsAuctionatorAvailable()
+    -- Modern API: Auctionator.API.v1.GetAuctionPriceByItemID(callerID, itemID)
+    if Auctionator and Auctionator.API and Auctionator.API.v1
+       and type(Auctionator.API.v1.GetAuctionPriceByItemID) == "function" then
+        return "v1_byID"
+    end
+    -- Same family, link-based variant
+    if Auctionator and Auctionator.API and Auctionator.API.v1
+       and type(Auctionator.API.v1.GetAuctionPriceByItemLink) == "function" then
+        return "v1_byLink"
+    end
+    -- Legacy ATR API still shipped by some Classic builds
+    if type(Atr_GetAuctionBuyout) == "function" then
+        return "atr"
+    end
+    return false
+end
+
+-- Returns:
+--   priceCopper, "ok"      → price available (per-unit, in copper)
+--   nil,         "no_addon" → Auctionator isn't installed / API not found
+--   nil,         "no_data"  → installed, but no scan data for this item
+local function GetAuctionPrice(link)
+    if not link then return nil, "no_data" end
+    local api = IsAuctionatorAvailable()
+    if not api then return nil, "no_addon" end
+
+    if api == "v1_byID" then
+        local itemID = GetItemInfoInstant and GetItemInfoInstant(link)
+        if not itemID then return nil, "no_data" end
+        local ok, price = pcall(Auctionator.API.v1.GetAuctionPriceByItemID,
+                                "LootLedger", itemID)
+        if not ok or not price or price <= 0 then return nil, "no_data" end
+        return price, "ok"
+    elseif api == "v1_byLink" then
+        local ok, price = pcall(Auctionator.API.v1.GetAuctionPriceByItemLink,
+                                "LootLedger", link)
+        if not ok or not price or price <= 0 then return nil, "no_data" end
+        return price, "ok"
+    elseif api == "atr" then
+        local ok, price = pcall(Atr_GetAuctionBuyout, link)
+        if not ok or not price or price <= 0 then return nil, "no_data" end
+        return price, "ok"
+    end
+    return nil, "no_addon"
 end
 
 -- Returns a bucket key "[Dungeon Name]" when the player is inside a dungeon
@@ -914,6 +970,7 @@ function UpdateTrackerUI()
         title:SetText("Loot Ledger")
 
         local totalVendor = 0
+        local totalAH     = 0
 
         local mobKeys = {}
         for k in pairs(LootLedgerDB) do
@@ -925,6 +982,40 @@ function UpdateTrackerUI()
             if ta ~= tb then return ta > tb end
             return a < b
         end)
+
+        -- Pre-pass: decide whether to show the "Scan AH for price" banner.
+        -- Only shown when Auctionator is installed but no item has data
+        -- (i.e. the player hasn't run a scan yet this session).
+        local needsAHScan = IsAuctionatorAvailable()
+        if needsAHScan then
+            for _, mobKey in ipairs(mobKeys) do
+                local data = LootLedgerDB[mobKey]
+                for item, qty in pairs(data.loot or {}) do
+                    if qty > 0 and not isHidden(item) then
+                        local link = data.links and data.links[item]
+                        if link then
+                            local _, status = GetAuctionPrice(link)
+                            if status == "ok" then
+                                needsAHScan = false
+                                break
+                            end
+                        end
+                    end
+                end
+                if not needsAHScan then break end
+            end
+        end
+
+        if needsAHScan then
+            local banner = GetLabel()
+            banner:SetPoint("TOPLEFT", 5, offset)
+            banner:SetPoint("RIGHT", Content, "RIGHT", -5, 0)
+            banner:EnableMouse(false)
+            banner.txt:SetFontObject("GameFontHighlightSmall")
+            banner.txt:SetText("|cFFFFAA00Scan auction house for AH prices.|r")
+            banner:Show()
+            offset = offset - 16
+        end
 
         for _, mobKey in ipairs(mobKeys) do
             local data = LootLedgerDB[mobKey]
@@ -947,12 +1038,15 @@ function UpdateTrackerUI()
                     if qty > 0 and not isHidden(item) and matchesSearch(mobDisplay, item) then
                         local link  = data.links and data.links[item]
                         local price = GetVendorPrice(link)
+                        local ahPrice = GetAuctionPrice(link)  -- nil if unavailable
                         visibleItems[#visibleItems + 1] = {
-                            name  = item,
-                            qty   = qty,
-                            link  = link,
-                            value = price * qty,
+                            name     = item,
+                            qty      = qty,
+                            link     = link,
+                            value    = price * qty,
                             hasPrice = price > 0,
+                            ahPrice  = ahPrice,
+                            ahValue  = (ahPrice and ahPrice * qty) or 0,
                         }
                     end
                 end
@@ -962,9 +1056,13 @@ function UpdateTrackerUI()
                     return a.name < b.name
                 end)
 
-                local mobVendor = 0
-                for _, e in ipairs(visibleItems) do mobVendor = mobVendor + e.value end
+                local mobVendor, mobAH = 0, 0
+                for _, e in ipairs(visibleItems) do
+                    mobVendor = mobVendor + e.value
+                    mobAH    = mobAH    + e.ahValue
+                end
                 totalVendor = totalVendor + mobVendor
+                totalAH     = totalAH     + mobAH
                 totalVal = totalVal + (data.totalGold or 0)
 
                 local isInstanceBucket = mobDisplay:sub(1, 1) == "["
@@ -987,9 +1085,22 @@ function UpdateTrackerUI()
                 -- Span the full content width so the money label can right-align.
                 mName:SetPoint("TOPLEFT", 5, offset)
                 mName:SetPoint("RIGHT", Content, "RIGHT", -5, 0)
+
+                -- Responsive layout: bound the name to the money label's
+                -- left edge with word-wrap so long names line-break instead
+                -- of overlapping the gold text.
+                mName.txt:ClearAllPoints()
+                mName.txt:SetPoint("TOPLEFT", 0, 0)
+                mName.txt:SetPoint("RIGHT", mName.money, "LEFT", -8, 0)
+                mName.txt:SetWordWrap(true)
+                mName.txt:SetJustifyH("LEFT")
+                mName.txt:SetJustifyV("TOP")
                 mName.txt:SetFontObject("GameFontNormal")
                 mName.txt:SetText(headerText)
                 mName.money:SetText(moneyText)
+
+                local mh = math.max(15, math.ceil((mName.txt:GetStringHeight() or 15) + 2))
+                mName:SetHeight(mh)
                 mName:SetScript("OnMouseDown", function(_, btn)
                     if btn == "LeftButton" then
                         S.collapsed[mobKey] = not S.collapsed[mobKey] or nil
@@ -998,7 +1109,7 @@ function UpdateTrackerUI()
                         ShowMobMenu(mobKey)
                     end
                 end)
-                mName:Show(); offset = offset - 15
+                mName:Show(); offset = offset - mh
 
                 if not collapsed then
                     if S.gridView then
@@ -1055,17 +1166,39 @@ function UpdateTrackerUI()
                             local itemName, qty = entry.name, entry.qty
                             local link = data.links and data.links[itemName]
                             local row  = GetLabel()
+                            -- Span full content width so the AH-price label
+                            -- can right-align without overlapping the name.
                             row:SetPoint("TOPLEFT", 25, offset)
+                            row:SetPoint("RIGHT", Content, "RIGHT", -5, 0)
 
+                            -- Anchor the name from the icon (or row's left
+                            -- edge) on the left, to the money label on the
+                            -- right, so word-wrap kicks in instead of
+                            -- visually overlapping the AH price.
+                            row.txt:ClearAllPoints()
                             if link then
                                 local icon = GetItemIcon and GetItemIcon(link)
                                 if icon then
                                     row.icon:SetTexture(icon)
+                                    row.icon:ClearAllPoints()
+                                    row.icon:SetPoint("TOPLEFT", 0, -1)
                                     row.icon:Show()
-                                    row.txt:ClearAllPoints()
-                                    row.txt:SetPoint("LEFT", row.icon, "RIGHT", 4, 0)
+                                    row.txt:SetPoint("TOPLEFT", row.icon, "TOPRIGHT", 4, 0)
+                                else
+                                    row.txt:SetPoint("TOPLEFT", 0, 0)
                                 end
+                            else
+                                row.txt:SetPoint("TOPLEFT", 0, 0)
                             end
+                            -- Item rows have no per-row gold/AH column;
+                            -- only the mob header shows dropped gold and
+                            -- the footer shows the AH total. Bound the
+                            -- name to the row's right edge so long names
+                            -- still wrap responsively.
+                            row.txt:SetPoint("RIGHT", -5, 0)
+                            row.txt:SetWordWrap(true)
+                            row.txt:SetJustifyH("LEFT")
+                            row.txt:SetJustifyV("TOP")
 
                             local colorStart, colorEnd = "", ""
                             if S.rarityColors then
@@ -1077,8 +1210,10 @@ function UpdateTrackerUI()
                             end
                             row.txt:SetText(colorStart .. itemName .. colorEnd .. " x" .. qty)
 
+                            local rh = math.max(14, math.ceil((row.txt:GetStringHeight() or 14) + 1))
+                            row:SetHeight(rh)
                             AttachItemHandlers(row, itemName, link)
-                            row:Show(); offset = offset - 14
+                            row:Show(); offset = offset - rh
                         end
                     end
                 end
@@ -1086,12 +1221,15 @@ function UpdateTrackerUI()
             end
         end
 
+        local parts = {}
+        parts[#parts + 1] = "Dropped: " .. FormatWoWMoney(totalVal)
         if totalVendor > 0 then
-            footer:SetText(string.format("Dropped: %s   Vendor: %s",
-                FormatWoWMoney(totalVal), FormatWoWMoney(totalVendor)))
-        else
-            footer:SetText("Dropped: " .. FormatWoWMoney(totalVal))
+            parts[#parts + 1] = "Vendor: " .. FormatWoWMoney(totalVendor)
         end
+        if totalAH > 0 then
+            parts[#parts + 1] = "AH: " .. FormatWoWMoney(totalAH)
+        end
+        footer:SetText(table.concat(parts, "\n"))
     end
 
     Content:SetHeight(math.abs(offset) + 40)
@@ -1555,6 +1693,18 @@ SlashCmdList["LLEDGER"] = function(msg)
         print("  recentDeaths     = " .. rd .. " entries")
         print("  in instance      = " .. tostring(GetInstanceBucketKey() ~= nil))
         print("  in group         = " .. tostring(IsInGroup and IsInGroup() or false))
+        print("  Auctionator API  = " .. tostring(IsAuctionatorAvailable()))
+        print("    Auctionator    = " .. tostring(Auctionator ~= nil))
+        print("    .API           = " .. tostring(Auctionator and Auctionator.API ~= nil))
+        print("    .API.v1        = " .. tostring(Auctionator and Auctionator.API and Auctionator.API.v1 ~= nil))
+        if Auctionator and Auctionator.API and Auctionator.API.v1 then
+            local fns = {}
+            for k, v in pairs(Auctionator.API.v1) do
+                if type(v) == "function" then fns[#fns + 1] = k end
+            end
+            table.sort(fns)
+            print("    v1 functions   = " .. table.concat(fns, ", "))
+        end
         return
     elseif msg == "help" or msg == "?" then
         print("|cFF00FFFFLoot Ledger:|r commands:")
