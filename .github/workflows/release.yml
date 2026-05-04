@@ -1,0 +1,24 @@
+name: Package and Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build addon zip
+        run: |
+          mkdir LootLedger
+          cp LootLedger.lua LootLedger.toc Bindings.xml LootLedger/
+          zip -r LootLedger.zip LootLedger/
+
+      - name: Attach zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: LootLedger.zip
