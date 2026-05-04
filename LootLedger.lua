@@ -1,5 +1,5 @@
 -- ==========================================================
--- LOOT LEDGER
+-- LOOT LEDGER v0.4
 -- RuneLite-style loot tracker: mobs, drops, gold per mob.
 -- Right-click an item for session / permanent ignore.
 -- ==========================================================
