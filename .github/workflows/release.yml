@@ -17,14 +17,18 @@ jobs:
 
       - name: Build addon zip
         run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          ZIP_NAME="LootLedger - ${VERSION}.zip"
           mkdir LootLedger
           cp LootLedger.lua LootLedger.toc Bindings.xml LootLedger/
-          zip -r LootLedger.zip LootLedger/
+          zip -r "${ZIP_NAME}" LootLedger/
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
 
       - name: Create GitHub release with zip
         uses: softprops/action-gh-release@v2
         with:
-          files: LootLedger.zip
+          files: ${{ env.ZIP_NAME }}
           generate_release_notes: true
 
       - name: Upload to CurseForge
@@ -43,5 +47,5 @@ jobs:
           curl -X POST \
             -H "X-Api-Token: $CF_TOKEN" \
             -F "metadata=$METADATA" \
-            -F "file=@LootLedger.zip" \
+            -F "file=@${{ env.ZIP_NAME }}" \
             "https://wow.curseforge.com/api/projects/1518759/upload-file"
