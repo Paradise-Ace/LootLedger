@@ -21,8 +21,27 @@ jobs:
           cp LootLedger.lua LootLedger.toc Bindings.xml LootLedger/
           zip -r LootLedger.zip LootLedger/
 
-      - name: Create release with zip
+      - name: Create GitHub release with zip
         uses: softprops/action-gh-release@v2
         with:
           files: LootLedger.zip
           generate_release_notes: true
+
+      - name: Upload to CurseForge
+        env:
+          CF_TOKEN: ${{ secrets.CURSEFORGE_API_TOKEN }}
+        run: |
+          VERSION_ID=$(curl -s \
+            -H "X-Api-Token: $CF_TOKEN" \
+            "https://wow.curseforge.com/api/game/versions" | \
+            jq '[.[] | select(.name == "2.5.5")] | .[0].id')
+
+          METADATA=$(jq -n \
+            --argjson versions "[$VERSION_ID]" \
+            '{changelog: "", changelogType: "text", gameVersions: $versions, releaseType: "release"}')
+
+          curl -X POST \
+            -H "X-Api-Token: $CF_TOKEN" \
+            -F "metadata=$METADATA" \
+            -F "file=@LootLedger.zip" \
+            "https://wow.curseforge.com/api/projects/1518759/upload-file"
