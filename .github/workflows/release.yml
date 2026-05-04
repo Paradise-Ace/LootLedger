@@ -1,8 +1,9 @@
 name: Package and Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   package:
@@ -20,7 +21,8 @@ jobs:
           cp LootLedger.lua LootLedger.toc Bindings.xml LootLedger/
           zip -r LootLedger.zip LootLedger/
 
-      - name: Attach zip to release
+      - name: Create release with zip
         uses: softprops/action-gh-release@v2
         with:
           files: LootLedger.zip
+          generate_release_notes: true
