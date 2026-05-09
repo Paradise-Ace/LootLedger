@@ -1,5 +1,5 @@
 -- ==========================================================
--- LOOT LEDGER v0.4.5
+-- LOOT LEDGER v0.5.0
 -- RuneLite-style loot tracker: mobs, drops, gold per mob.
 -- Right-click an item for session / permanent ignore.
 -- ==========================================================
@@ -10,7 +10,6 @@ local ADDON_NAME = ...
 -- Key binding label (shown in Escape > Key Bindings > AddOns)
 BINDING_NAME_LOOTLEDGER_TOGGLE = "Toggle Loot Ledger"
 
-local startTime      = time()
 local searchText     = ""
 local showIgnoreMode = false
 
@@ -47,6 +46,8 @@ local DEFAULTS = {
     point          = nil,
     width          = 320,
     height         = 420,
+    minimapAngle   = 45,
+    showAHPrice    = true,
     collapsed      = nil,  -- [mobKey] = true for collapsed entries
 }
 for k, v in pairs(DEFAULTS) do
@@ -139,6 +140,7 @@ local instanceFirstLoad  = true  -- skip counting on login / UI reload
 
 local labelPool = {}
 local UpdateTrackerUI  -- forward decl
+local ToggleLootLedger -- forward decl
 
 -- 2. MAIN FRAME --------------------------------------------
 local f = CreateFrame("Frame", "LootTrackerMainFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate")
@@ -177,6 +179,66 @@ local function RestorePosition()
 end
 RestorePosition()
 
+-- Minimap button -------------------------------------------
+local minimapBtn = CreateFrame("Button", "LootLedgerMinimapBtn", Minimap)
+minimapBtn:SetWidth(31)
+minimapBtn:SetHeight(31)
+minimapBtn:SetFrameStrata("MEDIUM")
+minimapBtn:SetFrameLevel(8)
+minimapBtn:RegisterForDrag("LeftButton")
+minimapBtn:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+
+local mmBackground = minimapBtn:CreateTexture(nil, "BACKGROUND")
+mmBackground:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
+mmBackground:SetWidth(20)
+mmBackground:SetHeight(20)
+mmBackground:SetPoint("TOPLEFT", minimapBtn, "TOPLEFT", 7, -5)
+
+local mmIcon = minimapBtn:CreateTexture(nil, "ARTWORK")
+mmIcon:SetTexture("Interface\\AddOns\\LootLedger\\icon")
+mmIcon:SetWidth(17)
+mmIcon:SetHeight(17)
+mmIcon:SetPoint("TOPLEFT", minimapBtn, "TOPLEFT", 7, -6)
+
+local mmBorder = minimapBtn:CreateTexture(nil, "OVERLAY")
+mmBorder:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+mmBorder:SetWidth(53)
+mmBorder:SetHeight(53)
+mmBorder:SetPoint("TOPLEFT", minimapBtn, "TOPLEFT", 0, 0)
+
+local function UpdateMinimapPos()
+    local angle = math.rad(S.minimapAngle or 45)
+    minimapBtn:ClearAllPoints()
+    minimapBtn:SetPoint("CENTER", Minimap, "CENTER",
+        math.cos(angle) * 80, math.sin(angle) * 80)
+end
+UpdateMinimapPos()
+
+minimapBtn:SetScript("OnDragStart", function(self)
+    self:LockHighlight()
+    self:SetScript("OnUpdate", function()
+        local mx, my = Minimap:GetCenter()
+        local cx, cy = GetCursorPosition()
+        local s = Minimap:GetEffectiveScale()
+        S.minimapAngle = math.mod(math.deg(math.atan2(cy / s - my, cx / s - mx)), 360)
+        UpdateMinimapPos()
+    end)
+end)
+minimapBtn:SetScript("OnDragStop", function(self)
+    self:UnlockHighlight()
+    self:SetScript("OnUpdate", nil)
+end)
+minimapBtn:SetScript("OnClick", function()
+    ToggleLootLedger()
+end)
+minimapBtn:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+    GameTooltip:SetText("Loot Ledger")
+    GameTooltip:AddLine("Click to toggle", 1, 1, 1)
+    GameTooltip:Show()
+end)
+minimapBtn:SetScript("OnLeave", GameTooltip_Hide)
+
 -- Reset the frame to default size and position. Useful if the user has
 -- resized/dragged the window somewhere unusable (e.g. resize grip off-screen).
 local function ResetFrame()
@@ -194,14 +256,11 @@ end
 local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 title:SetPoint("TOP", 0, -10); title:SetText("Loot Ledger")
 
-local timerTxt = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-timerTxt:SetPoint("TOP", 0, -26); timerTxt:SetText("00:00:00")
-
 local searchBox = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
 -- Anchor both left and right so the search box stretches with the frame.
 searchBox:SetHeight(20)
-searchBox:SetPoint("TOPLEFT", 20, -50)
-searchBox:SetPoint("TOPRIGHT", -20, -50)
+searchBox:SetPoint("TOPLEFT", 20, -32)
+searchBox:SetPoint("TOPRIGHT", -20, -32)
 searchBox:SetAutoFocus(false)
 searchBox:SetScript("OnTextChanged", function(self)
     searchText = self:GetText():lower()
@@ -332,7 +391,7 @@ undoTimer:SetScript("OnUpdate", function(self, elapsed)
 end)
 
 local sf = CreateFrame("ScrollFrame", "LootTrackerScroll", f, "UIPanelScrollFrameTemplate")
-sf:SetPoint("TOPLEFT", 12, -80); sf:SetPoint("BOTTOMRIGHT", -30, 40)
+sf:SetPoint("TOPLEFT", 12, -62); sf:SetPoint("BOTTOMRIGHT", -30, 40)
 local Content = CreateFrame("Frame", nil, sf)
 Content:SetSize(270, 1); sf:SetScrollChild(Content)
 
@@ -374,6 +433,11 @@ local function GetLabel()
     b.icon:SetSize(14, 14)
     b.icon:SetPoint("LEFT", 0, 0)
     b.icon:Hide()
+    b.border = b:CreateTexture(nil, "OVERLAY")
+    b.border:SetTexture("Interface\\Common\\WhiteIconFrame")
+    b.border:SetSize(14, 14)
+    b.border:SetPoint("CENTER", b.icon, "CENTER", 0, 0)
+    b.border:Hide()
     b.txt = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     b.txt:SetPoint("LEFT", 0, 0)
     -- Right-aligned money/AH label. Top-anchored so when the row grows
@@ -402,10 +466,11 @@ local function GetIconButton()
     b.icon = b:CreateTexture(nil, "ARTWORK")
     b.icon:SetAllPoints(b)
 
-    b.tint = b:CreateTexture(nil, "OVERLAY")
-    b.tint:SetAllPoints(b)
-    b.tint:SetBlendMode("ADD")
-    b.tint:Hide()
+    b.border = b:CreateTexture(nil, "OVERLAY")
+    b.border:SetTexture("Interface\\Common\\WhiteIconFrame")
+    b.border:SetSize(ICON_SIZE, ICON_SIZE)
+    b.border:SetPoint("CENTER", b, "CENTER", 0, 0)
+    b.border:Hide()
 
     b.qty = b:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
     b.qty:SetPoint("BOTTOMRIGHT", -2, 2)
@@ -422,7 +487,7 @@ local function ClearIconPool()
         btn:SetScript("OnLeave",     nil)
         btn:SetScript("OnMouseDown", nil)
         btn.icon:SetTexture(nil)
-        btn.tint:Hide()
+        btn.border:Hide()
         btn.qty:SetText("")
     end
 end
@@ -442,6 +507,7 @@ local function ClearUI()
         btn.txt:SetPoint("LEFT", 0, 0)
         btn.icon:Hide()
         btn.icon:SetTexture(nil)
+        btn.border:Hide()
         btn.money:SetText("")
     end
     ClearIconPool()
@@ -574,7 +640,7 @@ end
 
 -- 4b. SETTINGS PANEL ---------------------------------------
 local settingsFrame = CreateFrame("Frame", "LootLedgerSettings", UIParent, BackdropTemplateMixin and "BackdropTemplate")
-settingsFrame:SetSize(280, 280); settingsFrame:SetPoint("CENTER")
+settingsFrame:SetSize(280, 290); settingsFrame:SetPoint("CENTER")
 settingsFrame:SetFrameStrata("DIALOG")
 settingsFrame:SetBackdrop({
     bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
@@ -594,19 +660,19 @@ sTitle:SetPoint("TOP", 0, -14); sTitle:SetText("Loot Ledger — Settings")
 local sClose = CreateFrame("Button", nil, settingsFrame, "UIPanelCloseButton")
 sClose:SetPoint("TOPRIGHT", -4, -4)
 
--- Opacity slider
+-- Opacity slider (label left, current % right, no floating label above)
 local opacitySlider = CreateFrame("Slider", "LootLedgerOpacitySlider", settingsFrame, "OptionsSliderTemplate")
 opacitySlider:SetPoint("TOP", 0, -50)
 opacitySlider:SetWidth(220); opacitySlider:SetMinMaxValues(0, 1); opacitySlider:SetValueStep(0.05)
-opacitySlider:SetObeyStepOnDrag(true); opacitySlider:SetValue(S.opacity)
-_G[opacitySlider:GetName().."Low"]:SetText("0%")
-_G[opacitySlider:GetName().."High"]:SetText("100%")
-_G[opacitySlider:GetName().."Text"]:SetText(string.format("Background Opacity: %d%%", S.opacity * 100))
+opacitySlider:SetObeyStepOnDrag(true)
+_G[opacitySlider:GetName().."Low"]:SetText("Opacity")
+_G[opacitySlider:GetName().."Text"]:SetText("")
 opacitySlider:SetScript("OnValueChanged", function(self, value)
     S.opacity = value
     f:SetBackdropColor(0, 0, 0, value)
-    _G[self:GetName().."Text"]:SetText(string.format("Background Opacity: %d%%", value * 100))
+    _G[self:GetName().."High"]:SetText(string.format("%d%%", math.floor(value * 100)))
 end)
+opacitySlider:SetValue(S.opacity or 0.4)
 
 -- Compact grid view checkbox
 local gridCB = CreateFrame("CheckButton", "LootLedgerGridCB", settingsFrame, "InterfaceOptionsCheckButtonTemplate")
@@ -630,7 +696,7 @@ end)
 -- Rarity colors checkbox
 local rarityCB = CreateFrame("CheckButton", "LootLedgerRarityCB", settingsFrame, "InterfaceOptionsCheckButtonTemplate")
 rarityCB:SetPoint("TOPLEFT", 20, -155)
-rarityCB.Text:SetText("Color item names by rarity")
+rarityCB.Text:SetText("Show rarity border on icons")
 rarityCB:SetChecked(S.rarityColors)
 rarityCB:SetScript("OnClick", function(self)
     S.rarityColors = self:GetChecked() and true or false
@@ -644,6 +710,16 @@ linkCB.Text:SetText("Shift-click item to link in chat")
 linkCB:SetChecked(S.shiftClickLink)
 linkCB:SetScript("OnClick", function(self)
     S.shiftClickLink = self:GetChecked() and true or false
+end)
+
+-- Show AH price checkbox
+local ahPriceCB = CreateFrame("CheckButton", "LootLedgerAHPriceCB", settingsFrame, "InterfaceOptionsCheckButtonTemplate")
+ahPriceCB:SetPoint("TOPLEFT", 20, -215)
+ahPriceCB.Text:SetText("Show AH price in footer")
+ahPriceCB:SetChecked(S.showAHPrice)
+ahPriceCB:SetScript("OnClick", function(self)
+    S.showAHPrice = self:GetChecked() and true or false
+    UpdateTrackerUI()
 end)
 
 -- Reset window size/position
@@ -770,7 +846,6 @@ StaticPopupDialogs["LOOTLEDGER_CONFIRM_RESET_SESSION"] = {
         wipe(SessionIgnore)
         wipe(SeenCorpses)
         wipe(lootedCorpses)
-        startTime = time()
         UpdateTrackerUI()
     end,
     timeout      = 0,
@@ -1133,13 +1208,13 @@ function UpdateTrackerUI()
                             if S.rarityColors then
                                 local c, quality = GetRarityColor(link)
                                 if c and quality and quality >= 2 then
-                                    btn.tint:SetColorTexture(c.r, c.g, c.b, 0.35)
-                                    btn.tint:Show()
+                                    btn.border:SetVertexColor(c.r, c.g, c.b)
+                                    btn.border:Show()
                                 else
-                                    btn.tint:Hide()
+                                    btn.border:Hide()
                                 end
                             else
-                                btn.tint:Hide()
+                                btn.border:Hide()
                             end
 
                             if entry.qty > 1 then
@@ -1176,39 +1251,50 @@ function UpdateTrackerUI()
                             -- right, so word-wrap kicks in instead of
                             -- visually overlapping the AH price.
                             row.txt:ClearAllPoints()
+                            local hasIcon = false
                             if link then
                                 local icon = GetItemIcon and GetItemIcon(link)
                                 if icon then
+                                    hasIcon = true
                                     row.icon:SetTexture(icon)
+                                    row.icon:SetSize(14, 14)
                                     row.icon:ClearAllPoints()
                                     row.icon:SetPoint("TOPLEFT", 0, -1)
                                     row.icon:Show()
                                     row.txt:SetPoint("TOPLEFT", row.icon, "TOPRIGHT", 4, 0)
+                                    -- Rarity border behind the icon
+                                    if S.rarityColors then
+                                        local c, quality = GetRarityColor(link)
+                                        if c and quality and quality >= 2 then
+                                            row.border:SetVertexColor(c.r, c.g, c.b)
+                                            row.border:Show()
+                                        else
+                                            row.border:Hide()
+                                        end
+                                    else
+                                        row.border:Hide()
+                                    end
                                 else
+                                    row.border:Hide()
                                     row.txt:SetPoint("TOPLEFT", 0, 0)
                                 end
                             else
+                                row.border:Hide()
                                 row.txt:SetPoint("TOPLEFT", 0, 0)
                             end
-                            -- Item rows have no per-row gold/AH column;
-                            -- only the mob header shows dropped gold and
-                            -- the footer shows the AH total. Bound the
-                            -- name to the row's right edge so long names
-                            -- still wrap responsively.
                             row.txt:SetPoint("RIGHT", -5, 0)
                             row.txt:SetWordWrap(true)
                             row.txt:SetJustifyH("LEFT")
                             row.txt:SetJustifyV("TOP")
 
-                            local colorStart, colorEnd = "", ""
+                            local nameStr = itemName
                             if S.rarityColors then
                                 local c = GetRarityColor(link)
                                 if c then
-                                    colorStart = c.hex or ""
-                                    colorEnd   = "|r"
+                                    nameStr = (c.hex or "") .. itemName .. "|r"
                                 end
                             end
-                            row.txt:SetText(colorStart .. itemName .. colorEnd .. " x" .. qty)
+                            row.txt:SetText(nameStr .. " |cFFAAAAAA\195\151" .. qty .. "|r")
 
                             local rh = math.max(14, math.ceil((row.txt:GetStringHeight() or 14) + 1))
                             row:SetHeight(rh)
@@ -1226,7 +1312,7 @@ function UpdateTrackerUI()
         if totalVendor > 0 then
             parts[#parts + 1] = "Vendor: " .. FormatWoWMoney(totalVendor)
         end
-        if totalAH > 0 then
+        if totalAH > 0 and S.showAHPrice then
             parts[#parts + 1] = "AH: " .. FormatWoWMoney(totalAH)
         end
         footer:SetText(table.concat(parts, "\n"))
@@ -1289,6 +1375,19 @@ local LOOT_ITEM_MULTIPLE_PATTERN = buildLootItemPattern(LOOT_ITEM_SELF_MULTIPLE)
 local function OnAddonLoaded(loaded)
     if loaded ~= ADDON_NAME then return end
 
+    -- CRITICAL: SavedVariables may be loaded AFTER the addon .lua file runs,
+    -- which means the global LootLedgerSettings could have been replaced with
+    -- the real saved data AFTER `local S = LootLedgerSettings` executed.
+    -- S is a Lua upvalue shared by all closures, so re-assigning it here
+    -- (after SavedVariables are guaranteed available) fixes the stale-reference
+    -- bug and ensures every subsequent write goes to the correct saved table.
+    LootLedgerSettings = LootLedgerSettings or {}
+    S = LootLedgerSettings
+    S.collapsed = S.collapsed or {}
+    for k, v in pairs(DEFAULTS) do
+        if S[k] == nil then S[k] = v end
+    end
+
     -- Scrub legacy fields no longer used (kept only for backwards compat).
     for _, data in pairs(LootLedgerDB) do
         data.seenCorpses = nil
@@ -1330,6 +1429,17 @@ local function OnAddonLoaded(loaded)
     end
 
     UpdateTrackerUI()
+
+    -- Re-apply saved settings to UI elements.
+    -- SavedVariables are guaranteed loaded by the time ADDON_LOADED fires,
+    -- so this is the safe place to push stored values back into frames/sliders.
+    f:SetBackdropColor(0, 0, 0, S.opacity or 0.4)
+    opacitySlider:SetValue(S.opacity or 0.4)
+    gridCB:SetChecked(S.gridView)
+    combatHideCB:SetChecked(S.combatHide)
+    rarityCB:SetChecked(S.rarityColors)
+    linkCB:SetChecked(S.shiftClickLink)
+    ahPriceCB:SetChecked(S.showAHPrice)
 end
 
 local function OnCombatLog()
@@ -1657,7 +1767,7 @@ E:SetScript("OnEvent", function(self, event, ...)
 end)
 
 -- 8. SLASH COMMANDS & KEY BINDING --------------------------
-local function ToggleLootLedger()
+ToggleLootLedger = function()
     if f:IsShown() then f:Hide() else f:Show(); UpdateTrackerUI() end
 end
 
@@ -1718,17 +1828,8 @@ SlashCmdList["LLEDGER"] = function(msg)
     ToggleLootLedger()
 end
 
--- 9. TIMER -------------------------------------------------
+-- 9. RESIZE SAFETY NET ------------------------------------
 f:SetScript("OnUpdate", function(self, elapsed)
-    self.t = (self.t or 0) + elapsed
-    if self.t >= 1 then
-        local s = time() - startTime
-        timerTxt:SetText(string.format("%02d:%02d:%02d",
-            math.floor(s / 3600),
-            math.floor(s / 60) % 60,
-            s % 60))
-        self.t = 0
-    end
     -- Safety net: if the mouse is released outside the resize grip,
     -- OnMouseUp on the grip won't fire — stop sizing here instead.
     if isResizing and not IsMouseButtonDown("LeftButton") then
