@@ -31,10 +31,11 @@ AnniversaryLootDB = nil
 AnniversaryLootIgnore = nil
 AnniversaryLootSettings = nil
 
-LootLedgerDB        = LootLedgerDB        or {}  -- [mob] = { loot={[item]=qty}, links={[item]=link}, totalGold=n, kills=n }
-LootLedgerIgnore    = LootLedgerIgnore    or {}  -- [itemName] = true  (permanent item ignore)
-LootLedgerMobIgnore = LootLedgerMobIgnore or {}  -- [mobKey]   = true  (permanent mob ignore)
-LootLedgerSettings  = LootLedgerSettings  or {}
+LootLedgerDB           = LootLedgerDB           or {}  -- [mob] = { loot={[item]=qty}, links={[item]=link}, totalGold=n, kills=n }
+LootLedgerIgnore       = LootLedgerIgnore       or {}  -- [itemName] = true  (permanent item ignore)
+LootLedgerMobIgnore    = LootLedgerMobIgnore    or {}  -- [mobKey]   = true  (permanent mob ignore)
+LootLedgerVendorIgnore = LootLedgerVendorIgnore or {}  -- [itemName] = true  (exclude from vendor total)
+LootLedgerSettings     = LootLedgerSettings     or {}
 
 -- Merge defaults (so new settings added later get filled in on load)
 local DEFAULTS = {
@@ -57,6 +58,11 @@ for k, v in pairs(DEFAULTS) do
 end
 LootLedgerSettings.collapsed = LootLedgerSettings.collapsed or {}
 local S = LootLedgerSettings -- short alias
+
+-- Active loot DB alias. Assigned in OnAddonLoaded to either LootLedgerCharDB
+-- (normal) or LootLedgerDB (during migration grace period).
+-- TODO: remove migration code after v0.7.0 once all users have transitioned.
+local DB = {}
 
 -- In-memory only (cleared on /reload, logout, or toggling mode)
 local SessionIgnore = {}  -- [item] = true
@@ -341,7 +347,7 @@ local function PerformUndo()
         SessionIgnore[action.item] = nil
         if action.snapshot then
             for mobKey, oldQty in pairs(action.snapshot) do
-                local data = LootLedgerDB[mobKey]
+                local data = DB[mobKey]
                 if data and data.loot then
                     data.loot[action.item] = oldQty
                 end
@@ -351,7 +357,7 @@ local function PerformUndo()
         LootLedgerIgnore[action.item] = nil
         if action.snapshot then
             for mobKey, oldQty in pairs(action.snapshot) do
-                local data = LootLedgerDB[mobKey]
+                local data = DB[mobKey]
                 if data and data.loot then
                     data.loot[action.item] = oldQty
                 end
@@ -360,7 +366,7 @@ local function PerformUndo()
     elseif action.type == "mob" then
         LootLedgerMobIgnore[action.item] = nil
         if action.snapshot then
-            LootLedgerDB[action.item] = action.snapshot
+            DB[action.item] = action.snapshot
         end
         if action.corpseSnapshot then
             SeenCorpses[action.item] = action.corpseSnapshot
@@ -627,10 +633,10 @@ local function AddItemToBucket(key, itemName, link, qty)
     end
     if LootLedgerMobIgnore[key] then return false end
     if LootLedgerIgnore[itemName] or SessionIgnore[itemName] then return false end
-    if not LootLedgerDB[key] then
-        LootLedgerDB[key] = { loot = {}, links = {}, totalGold = 0, kills = 0 }
+    if not DB[key] then
+        DB[key] = { loot = {}, links = {}, totalGold = 0, kills = 0 }
     end
-    local data = LootLedgerDB[key]
+    local data = DB[key]
     data.loot[itemName]  = (data.loot[itemName] or 0) + qty
     data.links           = data.links or {}
     data.links[itemName] = link
@@ -768,7 +774,7 @@ local function InitItemMenu(self, level)
     info.text = "|cFFFF8800Ignore for this session|r"
     info.func = function()
         local snapshot = {}
-        for mobKey, data in pairs(LootLedgerDB) do
+        for mobKey, data in pairs(DB) do
             if data.loot and data.loot[itemName] then
                 snapshot[mobKey] = data.loot[itemName]
                 data.loot[itemName] = nil
@@ -789,7 +795,7 @@ local function InitItemMenu(self, level)
     info.text = "|cFFFF4444Ignore permanently|r"
     info.func = function()
         local snapshot = {}
-        for mobKey, data in pairs(LootLedgerDB) do
+        for mobKey, data in pairs(DB) do
             if data.loot and data.loot[itemName] then
                 snapshot[mobKey] = data.loot[itemName]
                 data.loot[itemName] = nil
@@ -802,6 +808,25 @@ local function InitItemMenu(self, level)
         }
         CloseDropDownMenus()
         UpdateTrackerUI()
+    end
+    UIDropDownMenu_AddButton(info, level)
+
+    info = UIDropDownMenu_CreateInfo()
+    info.notCheckable = true
+    if LootLedgerVendorIgnore[itemName] then
+        info.text = "|cFF00FF00Restore vendor price|r"
+        info.func = function()
+            LootLedgerVendorIgnore[itemName] = nil
+            CloseDropDownMenus()
+            UpdateTrackerUI()
+        end
+    else
+        info.text = "|cFF00CCFFIgnore vendor price|r"
+        info.func = function()
+            LootLedgerVendorIgnore[itemName] = true
+            CloseDropDownMenus()
+            UpdateTrackerUI()
+        end
     end
     UIDropDownMenu_AddButton(info, level)
 
@@ -825,8 +850,8 @@ StaticPopupDialogs["LOOTLEDGER_CONFIRM_RESET_MOB"] = {
     button1      = YES or "Yes",
     button2      = NO  or "No",
     OnAccept     = function(self, mobKey)
-        if mobKey and LootLedgerDB[mobKey] then
-            LootLedgerDB[mobKey] = nil
+        if mobKey and DB[mobKey] then
+            DB[mobKey] = nil
             SeenCorpses[mobKey] = nil
             UpdateTrackerUI()
         end
@@ -842,10 +867,31 @@ StaticPopupDialogs["LOOTLEDGER_CONFIRM_RESET_SESSION"] = {
     button1      = YES or "Yes",
     button2      = NO  or "No",
     OnAccept     = function()
-        wipe(LootLedgerDB)
+        wipe(DB)
         wipe(SessionIgnore)
         wipe(SeenCorpses)
         wipe(lootedCorpses)
+        UpdateTrackerUI()
+    end,
+    timeout      = 0,
+    whileDead    = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+-- TODO: remove after v0.7.0 — one-time migration popup from shared to per-character DB.
+StaticPopupDialogs["LOOTLEDGER_MIGRATION"] = {
+    text         = "Loot Ledger has been updated to v0.6.0!\n\nLoot is now tracked separately per character. Your existing shared loot history will be cleared when you confirm.\n\nPress |cFFFFAA00Not Yet|r to keep your data for now — you'll be asked again next login.",
+    button1      = "Confirm",
+    button2      = "Not Yet",
+    OnAccept     = function()
+        wipe(LootLedgerDB)
+        LootLedgerCharDB = LootLedgerCharDB or {}
+        DB = LootLedgerCharDB
+        UpdateTrackerUI()
+    end,
+    OnCancel     = function()
+        -- Keep using old shared DB for this session; popup fires again next login.
         UpdateTrackerUI()
     end,
     timeout      = 0,
@@ -881,9 +927,9 @@ local function InitMobMenu(self, level)
     info.text = "|cFFFF8800Ignore mob|r"
     info.func = function()
         CloseDropDownMenus()
-        local snapshot       = LootLedgerDB[mobKey]
+        local snapshot       = DB[mobKey]
         local corpseSnapshot = SeenCorpses[mobKey]
-        LootLedgerDB[mobKey] = nil
+        DB[mobKey] = nil
         SeenCorpses[mobKey]  = nil
         LootLedgerMobIgnore[mobKey] = true
         lastIgnoreAction = {
@@ -977,9 +1023,10 @@ function UpdateTrackerUI()
         -- ----- Ignore List View -----
         title:SetText("|cFFFFD100Ignore List|r")
 
-        local permKeys      = SortedKeys(LootLedgerIgnore)
-        local sessKeys      = SortedKeys(SessionIgnore)
-        local mobIgnoreKeys = SortedKeys(LootLedgerMobIgnore)
+        local permKeys         = SortedKeys(LootLedgerIgnore)
+        local sessKeys         = SortedKeys(SessionIgnore)
+        local mobIgnoreKeys    = SortedKeys(LootLedgerMobIgnore)
+        local vendorIgnoreKeys = SortedKeys(LootLedgerVendorIgnore)
 
         local function RenderSection(headerText, entries, removeAll, removeOne)
             local hdr = GetLabel()
@@ -1038,8 +1085,12 @@ function UpdateTrackerUI()
             function() wipe(LootLedgerMobIgnore); UpdateTrackerUI() end,
             function(k) LootLedgerMobIgnore[k] = nil; UpdateTrackerUI() end)
 
-        footer:SetText(string.format("%d permanent, %d session, %d mobs",
-            #permKeys, #sessKeys, #mobIgnoreKeys))
+        RenderSection("|cFFFFD100Vendor price|r", vendorIgnoreKeys,
+            function() wipe(LootLedgerVendorIgnore); UpdateTrackerUI() end,
+            function(k) LootLedgerVendorIgnore[k] = nil; UpdateTrackerUI() end)
+
+        footer:SetText(string.format("%d permanent, %d session, %d mobs, %d vendor",
+            #permKeys, #sessKeys, #mobIgnoreKeys, #vendorIgnoreKeys))
     else
         -- ----- Normal Loot View -----
         title:SetText("Loot Ledger")
@@ -1048,12 +1099,12 @@ function UpdateTrackerUI()
         local totalAH     = 0
 
         local mobKeys = {}
-        for k in pairs(LootLedgerDB) do
+        for k in pairs(DB) do
             if not LootLedgerMobIgnore[k] then mobKeys[#mobKeys + 1] = k end
         end
         table.sort(mobKeys, function(a, b)
-            local ta = LootLedgerDB[a].lastSeen or 0
-            local tb = LootLedgerDB[b].lastSeen or 0
+            local ta = DB[a].lastSeen or 0
+            local tb = DB[b].lastSeen or 0
             if ta ~= tb then return ta > tb end
             return a < b
         end)
@@ -1064,7 +1115,7 @@ function UpdateTrackerUI()
         local needsAHScan = IsAuctionatorAvailable()
         if needsAHScan then
             for _, mobKey in ipairs(mobKeys) do
-                local data = LootLedgerDB[mobKey]
+                local data = DB[mobKey]
                 for item, qty in pairs(data.loot or {}) do
                     if qty > 0 and not isHidden(item) then
                         local link = data.links and data.links[item]
@@ -1093,7 +1144,7 @@ function UpdateTrackerUI()
         end
 
         for _, mobKey in ipairs(mobKeys) do
-            local data = LootLedgerDB[mobKey]
+            local data = DB[mobKey]
             local mobDisplay = mobKey
 
             local hasVisible = false
@@ -1114,14 +1165,16 @@ function UpdateTrackerUI()
                         local link  = data.links and data.links[item]
                         local price = GetVendorPrice(link)
                         local ahPrice = GetAuctionPrice(link)  -- nil if unavailable
+                        local vendorIgnored = LootLedgerVendorIgnore[item] == true
                         visibleItems[#visibleItems + 1] = {
-                            name     = item,
-                            qty      = qty,
-                            link     = link,
-                            value    = price * qty,
-                            hasPrice = price > 0,
-                            ahPrice  = ahPrice,
-                            ahValue  = (ahPrice and ahPrice * qty) or 0,
+                            name          = item,
+                            qty           = qty,
+                            link          = link,
+                            value         = vendorIgnored and 0 or (price * qty),
+                            hasPrice      = price > 0,
+                            vendorIgnored = vendorIgnored,
+                            ahPrice       = ahPrice,
+                            ahValue       = (ahPrice and ahPrice * qty) or 0,
                         }
                     end
                 end
@@ -1294,6 +1347,9 @@ function UpdateTrackerUI()
                                     nameStr = (c.hex or "") .. itemName .. "|r"
                                 end
                             end
+                            if entry.vendorIgnored then
+                                nameStr = nameStr .. " |cFF00CCFF[no vendor]|r"
+                            end
                             row.txt:SetText(nameStr .. " |cFFAAAAAA\195\151" .. qty .. "|r")
 
                             local rh = math.max(14, math.ceil((row.txt:GetStringHeight() or 14) + 1))
@@ -1381,15 +1437,28 @@ local function OnAddonLoaded(loaded)
     -- S is a Lua upvalue shared by all closures, so re-assigning it here
     -- (after SavedVariables are guaranteed available) fixes the stale-reference
     -- bug and ensures every subsequent write goes to the correct saved table.
-    LootLedgerSettings = LootLedgerSettings or {}
+    LootLedgerSettings     = LootLedgerSettings     or {}
+    LootLedgerVendorIgnore = LootLedgerVendorIgnore or {}
     S = LootLedgerSettings
     S.collapsed = S.collapsed or {}
     for k, v in pairs(DEFAULTS) do
         if S[k] == nil then S[k] = v end
     end
 
+    -- TODO: remove after v0.7.0 — per-character DB migration.
+    -- If old shared LootLedgerDB has entries, show a one-time confirmation popup.
+    -- "Confirm" wipes the old DB and switches to LootLedgerCharDB.
+    -- "Not Yet" keeps the old DB active for this session; popup fires again next login.
+    if LootLedgerDB and next(LootLedgerDB) ~= nil then
+        DB = LootLedgerDB  -- keep showing old data while popup is open
+        StaticPopup_Show("LOOTLEDGER_MIGRATION")
+    else
+        LootLedgerCharDB = LootLedgerCharDB or {}
+        DB = LootLedgerCharDB
+    end
+
     -- Scrub legacy fields no longer used (kept only for backwards compat).
-    for _, data in pairs(LootLedgerDB) do
+    for _, data in pairs(DB) do
         data.seenCorpses = nil
         data.zone        = nil
     end
@@ -1397,19 +1466,19 @@ local function OnAddonLoaded(loaded)
     -- One-time migration: an earlier build keyed entries as "Name|Zone".
     -- Merge those into plain "Name" entries so same-named mobs combine.
     local merges = {}
-    for key in pairs(LootLedgerDB) do
+    for key in pairs(DB) do
         if type(key) == "string" and key:find("|", 1, true)
            and key:sub(1, 1) ~= "[" then
             merges[#merges + 1] = key
         end
     end
     for _, oldKey in ipairs(merges) do
-        local oldData = LootLedgerDB[oldKey]
+        local oldData = DB[oldKey]
         local pipe    = oldKey:find("|", 1, true)
         local newKey  = pipe and oldKey:sub(1, pipe - 1) or oldKey
-        local newData = LootLedgerDB[newKey]
+        local newData = DB[newKey]
         if not newData then
-            LootLedgerDB[newKey] = oldData
+            DB[newKey] = oldData
         else
             newData.kills     = (newData.kills or 0) + (oldData.kills or 0)
             newData.totalGold = (newData.totalGold or 0) + (oldData.totalGold or 0)
@@ -1425,7 +1494,7 @@ local function OnAddonLoaded(loaded)
                 newData.links[item] = newData.links[item] or link
             end
         end
-        LootLedgerDB[oldKey] = nil
+        DB[oldKey] = nil
     end
 
     UpdateTrackerUI()
@@ -1578,10 +1647,10 @@ local function OnLootOpened()
         return
     end
 
-    if not LootLedgerDB[key] then
-        LootLedgerDB[key] = { loot = {}, links = {}, totalGold = 0, kills = 0 }
+    if not DB[key] then
+        DB[key] = { loot = {}, links = {}, totalGold = 0, kills = 0 }
     end
-    local data = LootLedgerDB[key]
+    local data = DB[key]
     data.lastSeen  = time()
 
     -- 4. Increment the loot counter (outdoors only).
@@ -1640,11 +1709,11 @@ local function OnChatMsgMoney(msg)
     if not key then return end
 
     if LootLedgerMobIgnore[key] then return end
-    if not LootLedgerDB[key] then
-        LootLedgerDB[key] = { loot = {}, links = {}, totalGold = 0, kills = 0 }
+    if not DB[key] then
+        DB[key] = { loot = {}, links = {}, totalGold = 0, kills = 0 }
     end
-    LootLedgerDB[key].totalGold = (LootLedgerDB[key].totalGold or 0) + copper
-    LootLedgerDB[key].lastSeen  = time()
+    DB[key].totalGold = (DB[key].totalGold or 0) + copper
+    DB[key].lastSeen  = time()
     UpdateTrackerUI()
 end
 
@@ -1733,11 +1802,11 @@ local function OnEnteringWorld()
     local instanceKey = GetInstanceBucketKey()
     if not instanceFirstLoad and instanceKey
        and instanceKey ~= currentInstanceKey then
-        if not LootLedgerDB[instanceKey] then
-            LootLedgerDB[instanceKey] = { loot = {}, links = {},
+        if not DB[instanceKey] then
+            DB[instanceKey] = { loot = {}, links = {},
                 totalGold = 0, kills = 0 }
         end
-        local data = LootLedgerDB[instanceKey]
+        local data = DB[instanceKey]
         data.kills    = (data.kills or 0) + 1
         data.lastSeen = time()
         UpdateTrackerUI()

@@ -25,17 +25,11 @@ jobs:
           zip -r "${ZIP_NAME}" LootLedger/
           echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
 
-      - name: Create draft release with zip
+      - name: Create release with zip
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ZIP_NAME }}
           generate_release_notes: true
-          draft: true
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: false
 
       - name: Upload to CurseForge
         env:
