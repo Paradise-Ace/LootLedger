@@ -2,7 +2,7 @@
 ## Title: Loot Ledger
 ## Notes: RuneLite-style loot tracker for grinding sessions.
 ## Author: Paradiseace
-## Version: 0.6.0
+## Version: 0.7.0
 ## IconTexture: Interface\AddOns\LootLedger\icon
 ## SavedVariables: LootLedgerDB, LootLedgerIgnore, LootLedgerMobIgnore, LootLedgerVendorIgnore, LootLedgerSettings, AnniversaryLootDB, AnniversaryLootIgnore, AnniversaryLootSettings
 ## SavedVariablesPerCharacter: LootLedgerCharDB

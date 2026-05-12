@@ -49,6 +49,7 @@ local DEFAULTS = {
     height         = 420,
     minimapAngle   = 45,
     showAHPrice    = true,
+    showOnStart    = false,
     collapsed      = nil,  -- [mobKey] = true for collapsed entries
 }
 for k, v in pairs(DEFAULTS) do
@@ -147,6 +148,8 @@ local instanceFirstLoad  = true  -- skip counting on login / UI reload
 local labelPool = {}
 local UpdateTrackerUI  -- forward decl
 local ToggleLootLedger -- forward decl
+local isHidden         -- forward decl
+local exportFrame      -- forward decl
 
 -- 2. MAIN FRAME --------------------------------------------
 local f = CreateFrame("Frame", "LootTrackerMainFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate")
@@ -307,10 +310,23 @@ end)
 settingsBtn:SetScript("OnLeave", GameTooltip_Hide)
 -- OnClick handler set after SettingsFrame is built
 
+-- Export button. Clipboard icon, sits left of the ignore button.
+local exportBtn = CreateFrame("Button", nil, f)
+exportBtn:SetSize(22, 22)
+exportBtn:SetPoint("RIGHT", settingsBtn, "LEFT", -2, 0)
+exportBtn:SetNormalTexture("Interface\\Buttons\\UI-GuildButton-MOTD-Up")
+exportBtn:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+    GameTooltip:SetText("Export loot summary")
+    GameTooltip:Show()
+end)
+exportBtn:SetScript("OnLeave", GameTooltip_Hide)
+-- OnClick wired after export frame is built
+
 -- Ignore-list toggle. Paper/note icon to distinguish from the cog.
 local ignoreBtn = CreateFrame("Button", nil, f)
 ignoreBtn:SetSize(22, 22)
-ignoreBtn:SetPoint("RIGHT", settingsBtn, "LEFT", -2, 0)
+ignoreBtn:SetPoint("RIGHT", exportBtn, "LEFT", -2, 0)
 ignoreBtn:SetNormalTexture("Interface\\Buttons\\UI-GuildButton-PublicNote-Up")
 ignoreBtn:SetScript("OnClick", function()
     showIgnoreMode = not showIgnoreMode
@@ -520,6 +536,18 @@ local function ClearUI()
 end
 
 -- 4. MONEY FORMATTING --------------------------------------
+local function FormatMoneyPlain(copper)
+    if not copper or copper <= 0 then return "0c" end
+    local g = math.floor(copper / 10000)
+    local s = math.floor((copper % 10000) / 100)
+    local c = copper % 100
+    local out = ""
+    if g > 0 then out = out .. g .. "g " end
+    if s > 0 then out = out .. s .. "s " end
+    if c > 0 then out = out .. c .. "c" end
+    return out:match("^%s*(.-)%s*$")
+end
+
 local function FormatWoWMoney(rawCopper)
     if not rawCopper or rawCopper <= 0 then return "0c" end
     local g = math.floor(rawCopper / 10000)
@@ -646,14 +674,15 @@ end
 
 -- 4b. SETTINGS PANEL ---------------------------------------
 local settingsFrame = CreateFrame("Frame", "LootLedgerSettings", UIParent, BackdropTemplateMixin and "BackdropTemplate")
-settingsFrame:SetSize(280, 290); settingsFrame:SetPoint("CENTER")
+settingsFrame:SetSize(280, 320); settingsFrame:SetPoint("CENTER")
 settingsFrame:SetFrameStrata("DIALOG")
 settingsFrame:SetBackdrop({
-    bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
-    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-    tile = true, tileSize = 32, edgeSize = 32,
-    insets = { left = 11, right = 12, top = 12, bottom = 11 },
+    bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    tile = true, tileSize = 16, edgeSize = 16,
+    insets = { left = 4, right = 4, top = 4, bottom = 4 },
 })
+settingsFrame:SetBackdropColor(0, 0, 0, S.opacity or 0.4)
 settingsFrame:SetMovable(true); settingsFrame:EnableMouse(true)
 settingsFrame:RegisterForDrag("LeftButton")
 settingsFrame:SetScript("OnDragStart", settingsFrame.StartMoving)
@@ -676,6 +705,8 @@ _G[opacitySlider:GetName().."Text"]:SetText("")
 opacitySlider:SetScript("OnValueChanged", function(self, value)
     S.opacity = value
     f:SetBackdropColor(0, 0, 0, value)
+    settingsFrame:SetBackdropColor(0, 0, 0, value)
+    if exportFrame then exportFrame:SetBackdropColor(0, 0, 0, value) end
     _G[self:GetName().."High"]:SetText(string.format("%d%%", math.floor(value * 100)))
 end)
 opacitySlider:SetValue(S.opacity or 0.4)
@@ -728,6 +759,15 @@ ahPriceCB:SetScript("OnClick", function(self)
     UpdateTrackerUI()
 end)
 
+-- Show on start checkbox
+local showOnStartCB = CreateFrame("CheckButton", "LootLedgerShowOnStartCB", settingsFrame, "InterfaceOptionsCheckButtonTemplate")
+showOnStartCB:SetPoint("TOPLEFT", 20, -245)
+showOnStartCB.Text:SetText("Show window on login")
+showOnStartCB:SetChecked(S.showOnStart)
+showOnStartCB:SetScript("OnClick", function(self)
+    S.showOnStart = self:GetChecked() and true or false
+end)
+
 -- Reset window size/position
 local resetWindowBtn = CreateFrame("Button", nil, settingsFrame, "UIPanelButtonTemplate")
 resetWindowBtn:SetSize(120, 24); resetWindowBtn:SetPoint("BOTTOMLEFT", 20, 20)
@@ -747,6 +787,105 @@ end)
 -- Wire the cog button now that settings frame exists
 settingsBtn:SetScript("OnClick", function()
     if settingsFrame:IsShown() then settingsFrame:Hide() else settingsFrame:Show() end
+end)
+
+-- 4b. EXPORT FRAME -----------------------------------------
+exportFrame = CreateFrame("Frame", "LootLedgerExportFrame", UIParent,
+    BackdropTemplateMixin and "BackdropTemplate")
+exportFrame:SetSize(420, 320)
+exportFrame:SetPoint("CENTER")
+exportFrame:SetFrameStrata("DIALOG")
+exportFrame:SetBackdrop({
+    bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    tile = true, tileSize = 16, edgeSize = 16,
+    insets = { left = 4, right = 4, top = 4, bottom = 4 },
+})
+exportFrame:SetBackdropColor(0, 0, 0, S.opacity or 0.4)
+exportFrame:SetMovable(true); exportFrame:EnableMouse(true)
+exportFrame:RegisterForDrag("LeftButton")
+exportFrame:SetScript("OnDragStart", exportFrame.StartMoving)
+exportFrame:SetScript("OnDragStop",  exportFrame.StopMovingOrSizing)
+exportFrame:Hide()
+
+local eTitle = exportFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+eTitle:SetPoint("TOP", 0, -14)
+eTitle:SetText("Export  —  Ctrl+C to copy")
+
+local eClose = CreateFrame("Button", nil, exportFrame, "UIPanelCloseButton")
+eClose:SetPoint("TOPRIGHT", -4, -4)
+eClose:SetScript("OnClick", function() exportFrame:Hide() end)
+
+local eScroll = CreateFrame("ScrollFrame", "LootLedgerExportScroll", exportFrame)
+eScroll:SetPoint("TOPLEFT", 14, -36)
+eScroll:SetPoint("BOTTOMRIGHT", -14, 14)
+eScroll:EnableMouseWheel(true)
+eScroll:SetScript("OnMouseWheel", function(self, delta)
+    local cur = self:GetVerticalScroll()
+    local max = self:GetVerticalScrollRange()
+    self:SetVerticalScroll(math.max(0, math.min(max, cur - delta * 20)))
+end)
+
+local eBox = CreateFrame("EditBox", nil, eScroll)
+eBox:SetMultiLine(true)
+eBox:SetMaxLetters(0)
+eBox:SetFontObject("GameFontHighlightSmall")
+eBox:SetWidth(eScroll:GetWidth())
+eBox:SetAutoFocus(false)
+eBox:SetScript("OnEscapePressed", function() exportFrame:Hide() end)
+eScroll:SetScrollChild(eBox)
+
+local function BuildExportText()
+    local playerName = UnitName("player") or "Unknown"
+    local lines = {}  -- header added after we know the grand total
+    local grandTotal = 0
+
+    local mobKeys = {}
+    for k in pairs(DB) do
+        if not LootLedgerMobIgnore[k] then mobKeys[#mobKeys + 1] = k end
+    end
+    table.sort(mobKeys, function(a, b)
+        local ta = DB[a].lastSeen or 0
+        local tb = DB[b].lastSeen or 0
+        if ta ~= tb then return ta > tb end
+        return a < b
+    end)
+
+    for _, mobKey in ipairs(mobKeys) do
+        local data  = DB[mobKey]
+        local kills = data.kills or 0
+
+        -- Total = dropped gold + vendor value of all visible non-vendor-ignored items
+        local total = data.totalGold or 0
+        for item, qty in pairs(data.loot or {}) do
+            if qty > 0 and not isHidden(item) and not LootLedgerVendorIgnore[item] then
+                local link  = data.links and data.links[item]
+                total = total + GetVendorPrice(link) * qty
+            end
+        end
+        grandTotal = grandTotal + total
+
+        local label = mobKey == "Gathering"
+            and mobKey
+            or  mobKey .. " (" .. kills .. " kills)"
+        lines[#lines + 1] = label .. " - " .. FormatMoneyPlain(total)
+    end
+
+    table.insert(lines, 1, "Loot Ledger - " .. playerName
+        .. " (" .. FormatMoneyPlain(grandTotal) .. ")")
+    return table.concat(lines, "\r\n")
+end
+
+exportBtn:SetScript("OnClick", function()
+    if exportFrame:IsShown() then
+        exportFrame:Hide()
+    else
+        local text = BuildExportText()
+        eBox:SetText(text)
+        eBox:HighlightText()
+        eBox:SetFocus()
+        exportFrame:Show()
+    end
 end)
 
 
@@ -962,7 +1101,7 @@ local function matchesSearch(a, b)
         or (b and b:lower():find(searchText, 1, true))
 end
 
-local function isHidden(item)
+isHidden = function(item)
     return LootLedgerIgnore[item] or SessionIgnore[item]
 end
 
@@ -1206,8 +1345,9 @@ function UpdateTrackerUI()
                     moneyText = FormatWoWMoney(data.totalGold)
                 end
 
-                local headerText = string.format("%s %s%s|r (%d)",
-                    glyph, nameColor, mobDisplay, kills)
+                local headerText = mobDisplay == "Gathering"
+                    and string.format("%s %s%s|r", glyph, nameColor, mobDisplay)
+                    or  string.format("%s %s%s|r (%d)", glyph, nameColor, mobDisplay, kills)
 
                 local mName = GetLabel()
                 -- Span the full content width so the money label can right-align.
@@ -1509,6 +1649,12 @@ local function OnAddonLoaded(loaded)
     rarityCB:SetChecked(S.rarityColors)
     linkCB:SetChecked(S.shiftClickLink)
     ahPriceCB:SetChecked(S.showAHPrice)
+    showOnStartCB:SetChecked(S.showOnStart)
+
+    if S.showOnStart then
+        f:Show()
+        UpdateTrackerUI()
+    end
 end
 
 local function OnCombatLog()
