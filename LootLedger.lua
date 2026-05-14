@@ -65,6 +65,10 @@ local S = LootLedgerSettings -- short alias
 -- TODO: remove migration code after v0.7.0 once all users have transitioned.
 local DB = {}
 
+-- Per-character settings alias (sessionMode, shareOnExit).
+-- Assigned in OnAddonLoaded once LootLedgerCharSettings is available.
+local CS = {}
+
 -- In-memory only (cleared on /reload, logout, or toggling mode)
 local SessionIgnore = {}  -- [item] = true
 local wasShownBeforeCombat = false
@@ -126,6 +130,7 @@ local PROFESSION_GRACE = 5.0  -- seconds
 local PROFESSION_SPELL_IDS = {
     [31252] = true,  -- Prospecting
     [13262] = true,  -- Disenchant
+    [1804]  = true,  -- Pick Lock (Lockpicking)
 }
 
 -- Debug toggle. Off by default. Enable with /ll debug.
@@ -150,6 +155,7 @@ local UpdateTrackerUI  -- forward decl
 local ToggleLootLedger -- forward decl
 local isHidden         -- forward decl
 local exportFrame      -- forward decl
+local shareOnExitCB    -- forward decl (referenced inside sessionModeCB OnClick)
 
 -- 2. MAIN FRAME --------------------------------------------
 local f = CreateFrame("Frame", "LootTrackerMainFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate")
@@ -674,7 +680,7 @@ end
 
 -- 4b. SETTINGS PANEL ---------------------------------------
 local settingsFrame = CreateFrame("Frame", "LootLedgerSettings", UIParent, BackdropTemplateMixin and "BackdropTemplate")
-settingsFrame:SetSize(280, 320); settingsFrame:SetPoint("CENTER")
+settingsFrame:SetSize(280, 400); settingsFrame:SetPoint("CENTER")
 settingsFrame:SetFrameStrata("DIALOG")
 settingsFrame:SetBackdrop({
     bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
@@ -767,6 +773,33 @@ showOnStartCB:SetChecked(S.showOnStart)
 showOnStartCB:SetScript("OnClick", function(self)
     S.showOnStart = self:GetChecked() and true or false
 end)
+
+-- Session farming mode checkbox
+local sessionModeCB = CreateFrame("CheckButton", "LootLedgerSessionModeCB", settingsFrame, "InterfaceOptionsCheckButtonTemplate")
+sessionModeCB:SetPoint("TOPLEFT", 20, -275)
+sessionModeCB.Text:SetText("Session farming mode")
+sessionModeCB:SetChecked(CS.sessionMode)
+sessionModeCB:SetScript("OnClick", function(self)
+    if self:GetChecked() then
+        self:SetChecked(false)  -- hold off until confirmed
+        StaticPopup_Show("LOOTLEDGER_SESSION_MODE")
+    else
+        CS.sessionMode = false
+        CS.shareOnExit = false
+        shareOnExitCB:SetChecked(false)
+        shareOnExitCB:Hide()
+    end
+end)
+
+-- Share on exit checkbox (sub-option, only visible when session mode is on)
+shareOnExitCB = CreateFrame("CheckButton", "LootLedgerShareOnExitCB", settingsFrame, "InterfaceOptionsCheckButtonTemplate")
+shareOnExitCB:SetPoint("TOPLEFT", 35, -305)
+shareOnExitCB.Text:SetText("Share session summary on logout")
+shareOnExitCB:SetChecked(CS.shareOnExit)
+shareOnExitCB:SetScript("OnClick", function(self)
+    CS.shareOnExit = self:GetChecked() and true or false
+end)
+shareOnExitCB:Hide()  -- shown only when session mode is enabled
 
 -- Reset window size/position
 local resetWindowBtn = CreateFrame("Button", nil, settingsFrame, "UIPanelButtonTemplate")
@@ -1016,6 +1049,21 @@ StaticPopupDialogs["LOOTLEDGER_CONFIRM_RESET_SESSION"] = {
     whileDead    = true,
     hideOnEscape = true,
     preferredIndex = 3,
+}
+
+StaticPopupDialogs["LOOTLEDGER_SESSION_MODE"] = {
+    text    = "Session Farming Mode will |cFFFF4444wipe your entire loot history|r every time you log in to this character.\n\nAre you sure you want to enable it?",
+    button1 = "Enable",
+    button2 = "Cancel",
+    OnAccept = function()
+        CS.sessionMode = true
+        sessionModeCB:SetChecked(true)
+        shareOnExitCB:Show()
+    end,
+    OnCancel = function()
+        sessionModeCB:SetChecked(false)
+    end,
+    timeout = 0, whileDead = true, hideOnEscape = true, preferredIndex = 3,
 }
 
 -- TODO: remove after v0.7.0 — one-time migration popup from shared to per-character DB.
@@ -1539,6 +1587,7 @@ E:RegisterEvent("PLAYER_REGEN_ENABLED")
 E:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 E:RegisterEvent("PLAYER_ENTERING_WORLD")
 E:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+E:RegisterEvent("PLAYER_LOGOUT")
 
 -- Build locale-independent patterns from Blizzard's own format strings.
 local function buildMoneyPattern(fmt)
@@ -1579,7 +1628,11 @@ local function OnAddonLoaded(loaded)
     -- bug and ensures every subsequent write goes to the correct saved table.
     LootLedgerSettings     = LootLedgerSettings     or {}
     LootLedgerVendorIgnore = LootLedgerVendorIgnore or {}
-    S = LootLedgerSettings
+    LootLedgerCharSettings = LootLedgerCharSettings or {}
+    S  = LootLedgerSettings
+    CS = LootLedgerCharSettings
+    CS.sessionMode = CS.sessionMode ~= nil and CS.sessionMode or false
+    CS.shareOnExit = CS.shareOnExit ~= nil and CS.shareOnExit or false
     S.collapsed = S.collapsed or {}
     for k, v in pairs(DEFAULTS) do
         if S[k] == nil then S[k] = v end
@@ -1650,6 +1703,9 @@ local function OnAddonLoaded(loaded)
     linkCB:SetChecked(S.shiftClickLink)
     ahPriceCB:SetChecked(S.showAHPrice)
     showOnStartCB:SetChecked(S.showOnStart)
+    sessionModeCB:SetChecked(CS.sessionMode)
+    shareOnExitCB:SetChecked(CS.shareOnExit)
+    if CS.sessionMode then shareOnExitCB:Show() end
 
     if S.showOnStart then
         f:Show()
@@ -1762,8 +1818,16 @@ local function OnLootOpened()
         end
     elseif isMobCorpse then
         mobName = "Unknown"      -- creature corpse but we never damaged it
+    elseif not corpseGUID then
+        -- No GUID at all. If lockpicking was recently cast treat as its own
+        -- bucket, otherwise fall back to Gathering (regular chests, etc.).
+        if (GetTime() - lastProfessionCastAt) < PROFESSION_GRACE then
+            mobName = "Lockpicking"
+        else
+            isGathering = true
+        end
     else
-        mobName = "Unknown"      -- unrecognisable GUID (special-death mobs)
+        mobName = "Unknown"      -- non-nil but unrecognised GUID prefix
     end
 
     -- 3. Choose the destination bucket
@@ -1944,7 +2008,16 @@ local function OnSpellCastSucceeded(unit, _, spellID)
     end
 end
 
-local function OnEnteringWorld()
+local function OnEnteringWorld(isInitialLogin, isReloadingUi)
+    -- Session mode: wipe the DB on a genuine login, but NOT on /reload.
+    -- instanceFirstLoad is true only on the very first PLAYER_ENTERING_WORLD
+    -- of this session, so the wipe never fires again on zone transitions.
+    if CS.sessionMode and instanceFirstLoad and not isReloadingUi then
+        wipe(LootLedgerCharDB)
+        DB = LootLedgerCharDB
+        UpdateTrackerUI()
+    end
+
     local instanceKey = GetInstanceBucketKey()
     if not instanceFirstLoad and instanceKey
        and instanceKey ~= currentInstanceKey then
@@ -1961,6 +2034,36 @@ local function OnEnteringWorld()
     currentInstanceKey = instanceKey
 end
 
+local function OnPlayerLogout()
+    if not CS.sessionMode or not CS.shareOnExit then return end
+
+    local mobCount  = 0
+    local grandTotal = 0
+    for mobKey, data in pairs(DB) do
+        if not LootLedgerMobIgnore[mobKey] then
+            mobCount = mobCount + 1
+            grandTotal = grandTotal + (data.totalGold or 0)
+            for item, qty in pairs(data.loot or {}) do
+                if qty > 0 and not isHidden(item) and not LootLedgerVendorIgnore[item] then
+                    local link = data.links and data.links[item]
+                    grandTotal = grandTotal + GetVendorPrice(link) * qty
+                end
+            end
+        end
+    end
+
+    if mobCount == 0 then return end
+
+    local msg = string.format("[Loot Ledger] Session ended — %d mob%s, %s earned",
+        mobCount, mobCount == 1 and "" or "s", FormatMoneyPlain(grandTotal))
+
+    if IsInRaid() then
+        SendChatMessage(msg, "RAID")
+    elseif GetNumPartyMembers() > 0 then
+        SendChatMessage(msg, "PARTY")
+    end
+end
+
 -- Dispatcher — routes each WoW event to its handler function.
 local EventHandlers = {
     ADDON_LOADED                = OnAddonLoaded,
@@ -1974,6 +2077,7 @@ local EventHandlers = {
     GET_ITEM_INFO_RECEIVED      = OnItemInfoReceived,
     PLAYER_ENTERING_WORLD       = OnEnteringWorld,
     UNIT_SPELLCAST_SUCCEEDED    = OnSpellCastSucceeded,
+    PLAYER_LOGOUT               = OnPlayerLogout,
 }
 
 E:SetScript("OnEvent", function(self, event, ...)
